@@ -1,6 +1,6 @@
 """Figure Extractor for PPTX — ローカルで動く Web アプリ。
 
-    python app.py            # ブラウザが http://127.0.0.1:8765 を開く
+    python app.py            # ブラウザが http://127.0.0.1:8790 を開く（使用中なら次の空き）
     python app.py --port 9000 --no-browser
 """
 from __future__ import annotations
@@ -233,17 +233,33 @@ def open_folder():
     return jsonify({"ok": True})
 
 
+def _free_port(start: int, tries: int = 50) -> int:
+    """start から順に、空いているポートを探す（ほかのアプリが使っているポートは避ける）。"""
+    import socket
+    for port in range(start, start + tries):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            try:
+                s.bind(("127.0.0.1", port))
+                return port
+            except OSError:
+                continue
+    raise SystemExit(f"{start}〜{start + tries - 1} のポートがすべて使われています。--port で指定してください")
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--port", type=int, default=8765)
+    ap.add_argument("--port", type=int, default=8790, help="使うポート（使用中なら次の空きを探す）")
     ap.add_argument("--no-browser", action="store_true")
     a = ap.parse_args()
     os.makedirs(WORK, exist_ok=True)
-    url = f"http://127.0.0.1:{a.port}/"
+    port = _free_port(a.port)
+    if port != a.port:
+        print(f"ポート {a.port} は別のアプリが使っているため、{port} を使います")
+    url = f"http://127.0.0.1:{port}/"
     print(f"Figure Extractor: {url}  （描画: {renderer.available_renderer() or '見つかりません'}）")
     if not a.no_browser:
         threading.Timer(1.0, lambda: webbrowser.open(url)).start()
-    app.run(host="127.0.0.1", port=a.port, threaded=True)
+    app.run(host="127.0.0.1", port=port, threaded=True)
 
 
 if __name__ == "__main__":
