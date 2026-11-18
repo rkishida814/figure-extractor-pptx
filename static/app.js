@@ -361,6 +361,13 @@ function extOf(it) { return custom[it.key]?.ext ?? defaultExt; }
 
 function renderList() {
   const ol = $("list");
+  // 入力中の欄があれば、描き直したあとにカーソル位置と選択範囲を戻す
+  const ae = document.activeElement;
+  let keep = null;
+  if (ae && ol.contains(ae)) {
+    keep = { key: ae.closest("li")?.dataset.key, cls: ae.className.split(" ")[0] };
+    if (ae.tagName === "INPUT") Object.assign(keep, { s: ae.selectionStart, e: ae.selectionEnd, d: ae.selectionDirection });
+  }
   ol.innerHTML = "";
   $("count").textContent = selected.length;
   $("emptyMsg").hidden = selected.length > 0;
@@ -370,8 +377,10 @@ function renderList() {
     li.dataset.key = it.key;
     if (it.ids.length > 1) li.classList.add("merged");
     if (it.key === currentKey) li.classList.add("current");
-    li.addEventListener("click", (e) => {
-      if (e.target.closest("input, select, button")) return;
+    // click だと、名前の欄で押して欄の外で離したときも行のクリックになり、一覧が描き直されて
+    // 文字の選択が消える。行の余白で押したときだけ「いまの図」にする。
+    li.addEventListener("mousedown", (e) => {
+      if (e.button !== 0 || e.target.closest("input, select, button")) return;
       if (it.slide !== cur) showSlide(it.slide);
       setCurrent(it.key);
     });
@@ -440,6 +449,14 @@ function renderList() {
     li.addEventListener("mouseleave", () => { hoverKey = null; drawOverlay(); });
     ol.appendChild(li);
   });
+  if (keep && keep.key) {
+    const li = [...ol.children].find((x) => x.dataset.key === keep.key);
+    const el = li?.querySelector("." + keep.cls);
+    if (el) {
+      el.focus({ preventScroll: true });
+      if (keep.s !== undefined && el.setSelectionRange) el.setSelectionRange(keep.s, keep.e, keep.d);
+    }
+  }
   if (selected.some((e) => !previews[sigOf(e)])) requestPreviews();
 }
 
