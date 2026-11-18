@@ -13,7 +13,7 @@
   <span id="fileName" class="muted"></span>
   <span id="status" class="muted"></span>
   <span class="spacer"></span>
-  <span class="hint">クリックで選択 ／ 同じ所をもう一度クリック（⌥+クリック）で下のオブジェクト ／ ⌘・Ctrl・Shift+クリックで追加・解除 ／ ドラッグで範囲選択（⌥+ドラッグで1枚に）／ ⌘G まとめる ／ Esc 解除 ／ ⌘Z 戻す</span>
+  <span class="hint">クリックで新しい図 ／ ⌘・Shift+クリックでいまの図に足す・外す ／ ドラッグで囲んだものを1枚に（⌘+ドラッグで足す）／ 同じ所をもう一度クリックで下のオブジェクト ／ ⌘Z 戻す</span>
 </header>
 
 <main>
@@ -48,12 +48,8 @@
       </label>
       <button class="btn small" id="clearBtn">すべて解除</button>
     </div>
-    <div class="mergeBar">
-      <button class="btn small" id="mergeBtn" disabled title="⌘G">全部を1枚にまとめる</button>
-      <span class="muted">⌥+ドラッグで囲むと最初から1枚に</span>
-    </div>
     <ol id="list"></ol>
-    <p id="emptyMsg" class="muted">スライド上のオブジェクトをクリックすると、ここに選んだ順に並びます。</p>
+    <p id="emptyMsg" class="muted">オブジェクトをクリックすると図が1枚でき、ここに選んだ順に並びます。⌘+クリックやドラッグで選んだ複数のオブジェクトは1枚の図になります。</p>
 
     <div class="save">
       <label class="row">保存先
@@ -69,7 +65,7 @@
             <option value="1200">1200 dpi</option>
           </select>
         </label>
-        <label title="png・tif のみ。jpg・bmp は白背景になります"><input type="checkbox" id="transparent"> 背景を透明に（png・tif）</label>
+        <label title="png・tif のみ。jpg・bmp は白背景になります"><input type="checkbox" id="transparent" checked> 背景を透明に（png・tif）</label>
       </div>
       <button class="btn primary big" id="saveBtn" disabled>一括保存</button>
       <div id="result"></div>

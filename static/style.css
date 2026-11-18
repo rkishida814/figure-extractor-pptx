@@ -78,7 +78,7 @@ main { flex: 1; display: flex; min-height: 0; }
 #list { list-style: none; margin: 0; padding: 6px 8px; overflow-y: auto; flex: 1; }
 #emptyMsg { padding: 0 14px; }
 #list li {
-  display: grid; grid-template-columns: 16px 18px 96px 1fr auto; gap: 6px; align-items: center;
+  display: grid; grid-template-columns: 18px 96px 1fr auto; cursor: pointer; gap: 6px; align-items: center;
   padding: 6px; border-radius: 6px; border: 1px solid transparent;
 }
 #list li:hover, #list li.hl { background: #fff6ec; border-color: #ffd7aa; }
@@ -107,8 +107,10 @@ main { flex: 1; display: flex; min-height: 0; }
 .busy { position: fixed; inset: 0; background: rgba(255,255,255,.6); display: flex; align-items: center; justify-content: center; z-index: 10; font-size: 16px; }
 .busy div { background: #fff; padding: 16px 24px; border-radius: 8px; box-shadow: 0 2px 12px rgba(0,0,0,.2); }
 
-.mergeBar { display: flex; align-items: center; gap: 8px; padding: 6px 12px; border-bottom: 1px solid var(--line); font-size: 12px; }
 #list li.merged .crop { border-color: var(--orange); border-style: dashed; }
 #list .acts { display: flex; align-items: center; gap: 2px; }
 .box.grp { outline: 2px dashed var(--orange); outline-offset: 0; }
 .box.grp .num { white-space: nowrap; }
+#list li.current { background: #fff1e0; border-color: var(--orange); }
+.box.sel.current { outline-width: 4px; }
+.box.grp.current { outline-width: 3px; }

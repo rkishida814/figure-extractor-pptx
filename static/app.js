@@ -11,8 +11,7 @@ let data = null;          // /api/upload の結果
 let cur = 0;              // 表示中のスライド
 let selected = [];        // 図の一覧（選んだ順）[{key, slide, ids:[並び順...]}]。ids が複数なら1枚にまとめる
 let custom = {};          // 図の key -> {name?, ext?}（選び直しても覚えておく）
-let checked = new Set();  // 一覧でチェックした図の key
-let gseq = 0;             // まとめた図の key の通し番号
+let gseq = 0;             // 図の key の通し番号
 let history = [];         // 選択の取り消し用
 let defaultExt = LS.get("ext", "png");
 let hoverKey = null;
@@ -26,7 +25,7 @@ const entryIndexOf = (slide, id) => selected.findIndex((e) => e.slide === slide 
 async function init() {
   $("folder").value = LS.get("folder", "");
   $("dpi").value = LS.get("dpi", "300");
-  $("transparent").checked = LS.get("transparent", "0") === "1";
+  $("transparent").checked = LS.get("transparent", "1") === "1";
   try {
     const st = await (await fetch("/api/status")).json();
     $("rendererInfo").textContent = st.renderer
@@ -46,7 +45,7 @@ async function loadFile(file) {
     const j = await r.json();
     if (!r.ok) throw new Error(j.error || r.statusText);
     data = j;
-    cur = 0; selected = []; custom = {}; history = [];
+    cur = 0; selected = []; custom = {}; history = []; currentKey = null; cycleKey = null; lastPick = null;
     $("fileName").textContent = j.filename;
     $("status").textContent = `${j.slides.length} 枚`;
     $("drop").hidden = true;
@@ -121,9 +120,9 @@ function drawOverlay() {
     if (e.slide !== cur || e.ids.length < 2) return;
     const b = entryBox(e);
     const g = document.createElement("div");
-    g.className = "box grp";
+    g.className = "box grp" + (e.key === currentKey ? " current" : "");
     Object.assign(g.style, { left: b.x * s - 4 + "px", top: b.y * s - 4 + "px", width: b.w * s + 8 + "px", height: b.h * s + 8 + "px" });
-    const t = document.createElement("span"); t.className = "num"; t.textContent = `${k + 1}（${e.ids.length}個で1枚）`;
+    const t = document.createElement("span"); t.className = "num"; t.textContent = `${k + 1}（${e.ids.length}個）`;
     g.appendChild(t);
     ov.appendChild(g);
   });
@@ -133,7 +132,7 @@ function drawOverlay() {
     const k = n ? n - 1 : -1;
     if (!n && key !== hoverKey) continue;
     const b = document.createElement("div");
-    b.className = "box " + (n ? "sel" : "hover");
+    b.className = "box " + (n ? "sel" : "hover") + (n && selected[k].key === currentKey ? " current" : "");
     Object.assign(b.style, {
       left: sh.x * s + "px", top: sh.y * s + "px",
       width: Math.max(2, sh.w * s) + "px", height: Math.max(2, sh.h * s) + "px",
@@ -205,6 +204,14 @@ function aabb(sh) {
 }
 
 // ------------------------------------------------------------------ 選択
+//
+// 一覧の 1 行が 1 枚の図。
+// - クリック：新しい図を始める（すでにどこかの図に入っているオブジェクトなら、その図を「いまの図」にする）
+// - ⌘・Ctrl・Shift+クリック：いまの図に足す（入っていれば外す）→ 複数のオブジェクトが 1 枚になる
+// - ドラッグ：囲んだオブジェクトで新しい図を 1 枚作る（⌘ 等を押しながらなら、いまの図に足す）
+// - 同じ場所をもう一度クリック（⌥+クリック）：その図の中身を、重なった下のオブジェクトに替える
+
+let currentKey = null;     // いまの図
 
 function entryBox(e) {
   let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
@@ -216,76 +223,63 @@ function entryBox(e) {
 }
 
 function pushHistory() {
-  history.push(selected.map((e) => ({ ...e, ids: [...e.ids] })));
+  history.push({ list: selected.map((e) => ({ ...e, ids: [...e.ids] })), current: currentKey });
   if (history.length > 100) history.shift();
 }
 
-function setSelection(list) {
+function commit(list, current) {
   pushHistory();
-  selected = list;
-  const keys = new Set(list.map((e) => e.key));
-  checked = new Set([...checked].filter((k) => keys.has(k)));
+  selected = list.filter((e) => e.ids.length > 0);
+  currentKey = selected.some((e) => e.key === current) ? current : null;
   drawOverlay();
   renderList();
 }
 
-function single(slide, id) { return { key: keyOf(slide, id), slide, ids: [id] }; }
-function group(slide, ids) {
-  if (ids.length === 1) return single(slide, ids[0]);
-  return { key: `g${++gseq}`, slide, ids: [...ids].sort((a, b) => a - b) };
+function setCurrent(key) {
+  currentKey = key;
+  drawOverlay();
+  renderList();
 }
 
-// ⌘+クリック：入っていれば外し（まとめた図からも外す）、無ければ1枚の図として足す
-function toggle(slide, id) {
-  const k = entryIndexOf(slide, id);
-  if (k < 0) { setSelection([...selected, single(slide, id)]); return; }
-  const e = selected[k];
-  const rest = e.ids.filter((x) => x !== id);
-  const list = [...selected];
-  if (rest.length) list[k] = { ...e, ids: rest }; else list.splice(k, 1);
-  setSelection(list);
+function newEntry(slide, ids) { return { key: `f${++gseq}`, slide, ids: [...ids].sort((a, b) => a - b) }; }
+
+// ids をほかの図から抜いた一覧を返す
+function without(list, slide, ids) {
+  return list.map((e) => (e.slide === slide ? { ...e, ids: e.ids.filter((x) => !ids.includes(x)) } : e));
 }
 
-function addMany(shapes) {
-  const add = shapes.filter((sh) => entryIndexOf(cur, sh.id) < 0).map((sh) => single(cur, sh.id));
-  setSelection([...selected, ...add]);
+function startFigure(ids) {
+  if (!ids.length) return;
+  const e = newEntry(cur, ids);
+  commit([...without(selected, cur, ids), e], e.key);
 }
 
-function addAsOne(shapes, replace) {
-  const ids = shapes.map((sh) => sh.id).filter((id) => replace || entryIndexOf(cur, id) < 0);
-  if (!ids.length) { if (replace) setSelection([]); return; }
-  setSelection([...(replace ? [] : selected), group(cur, ids)]);
+function addToCurrent(ids) {
+  const curE = selected.find((e) => e.key === currentKey);
+  if (!curE || curE.slide !== cur) { startFigure(ids); return; }   // 別のスライドの図には足せない
+  const list = without(selected, cur, ids).map((e) =>
+    e.key === curE.key ? { ...e, ids: [...new Set([...curE.ids, ...ids])].sort((a, b) => a - b) } : e);
+  commit(list, curE.key);
 }
 
-// 一覧の図を1枚にまとめる（チェックが2つ以上ならその図、無ければ全部）
-function mergeEntries() {
-  const targets = checked.size >= 2 ? selected.filter((e) => checked.has(e.key)) : selected;
-  if (targets.length < 2) return;
-  const slide = targets[0].slide;
-  if (targets.some((e) => e.slide !== slide)) {
-    alert("別のスライドのオブジェクトは1枚にまとめられません。同じスライドの図だけをチェックしてください。");
-    return;
+function toggleInCurrent(id) {
+  const curE = selected.find((e) => e.key === currentKey);
+  if (curE && curE.slide === cur && curE.ids.includes(id)) {
+    commit(selected.map((e) => (e.key === curE.key ? { ...e, ids: e.ids.filter((x) => x !== id) } : e)), curE.key);
+  } else {
+    addToCurrent([id]);
   }
-  const merged = group(slide, targets.flatMap((e) => e.ids));
-  if (custom[targets[0].key]) custom[merged.key] = { ...custom[targets[0].key] };
-  const first = selected.indexOf(targets[0]);
-  const list = selected.filter((e) => !targets.includes(e));
-  list.splice(first, 0, merged);
-  checked.clear();
-  setSelection(list);
 }
 
-function splitEntry(e) {
-  const k = selected.indexOf(e);
-  const list = [...selected];
-  list.splice(k, 1, ...e.ids.map((id) => single(e.slide, id)));
-  setSelection(list);
-}
+function addMany(shapes) { addToCurrent(shapes.map((sh) => sh.id)); }
 
 let drag = null;
+let cycleKey = null;   // 同じ場所の再クリックで中身を替える図
 
-$("stage").addEventListener("mousedown", (ev) => {
-  if (ev.button !== 0 || !data) return;
+// スライドの外（周りの灰色の部分）から始めたドラッグも範囲選択にする
+$("stageWrap").addEventListener("mousedown", (ev) => {
+  if (ev.button !== 0 || !data || $("stage").hidden) return;
+  if (ev.target.closest("#slideNav, button, input, select, a")) return;
   ev.preventDefault();
   drag = { start: toEmu(ev), sx: ev.clientX, sy: ev.clientY, moved: false, add: ev.metaKey || ev.ctrlKey || ev.shiftKey, alt: ev.altKey };
 });
@@ -319,35 +313,45 @@ window.addEventListener("mouseup", (ev) => {
   drag = null;
   $("band").hidden = true;
   if (d.moved) {
+    cycleKey = null; lastPick = null;
     const p = toEmu(ev);
     const x0 = Math.min(p.x, d.start.x), x1 = Math.max(p.x, d.start.x);
     const y0 = Math.min(p.y, d.start.y), y1 = Math.max(p.y, d.start.y);
-    const inside = data.slides[cur].shapes.filter((sh) => {
+    const ids = data.slides[cur].shapes.filter((sh) => {
       const b = aabb(sh);
       return b.x >= x0 && b.y >= y0 && b.x + b.w <= x1 && b.y + b.h <= y1;
-    });
-    if (d.alt) addAsOne(inside, !d.add);      // ⌥+ドラッグ：囲んだものを1枚の図に
-    else if (d.add) addMany(inside);
-    else setSelection(inside.map((sh) => single(cur, sh.id)));
+    }).map((sh) => sh.id);
+    if (d.add) addToCurrent(ids); else startFigure(ids);
     return;
   }
-  if (d.add && !d.alt) {   // ⌘ 等だけ：最前面を追加・解除
-    const sh = hit(d.start);
-    lastPick = sh ? { slide: cur, x: d.start.x, y: d.start.y, id: sh.id } : null;
-    if (sh) toggle(cur, sh.id);
-    return;
-  }
+
+  const prev = lastPick ? { ...lastPick } : null;
   const sh = pickAt(d.start, d.alt);
-  if (d.add) {             // ⌘+⌥：下のオブジェクトを追加
-    if (sh && entryIndexOf(cur, sh.id) < 0) setSelection([...selected, single(cur, sh.id)]);
+  if (!sh) { cycleKey = null; if (currentKey) setCurrent(null); return; }
+  const cycled = prev && prev.slide === cur && prev.id !== sh.id && hitAll(d.start).some((h) => h.id === prev.id);
+
+  if (d.add) {
+    if (cycled && currentKey) {   // ⌘+再クリック：いま足したものを下のオブジェクトに替える
+      const list = selected.map((e) => (e.key === currentKey ? { ...e, ids: e.ids.filter((x) => x !== prev.id) } : e));
+      selected = list;
+    }
+    if (d.alt || cycled) addToCurrent([sh.id]); else toggleInCurrent(sh.id);
     return;
   }
-  if (sh) {
-    if (selected.length === 1 && entryIndexOf(cur, sh.id) === 0) return;
-    setSelection([single(cur, sh.id)]);
-  } else if (selected.length) {
-    setSelection([]);
+
+  // 再クリック：直前のクリックで作った図の中身を、下のオブジェクトに替える
+  if (cycled && cycleKey) {
+    const e = selected.find((x) => x.key === cycleKey);
+    if (e && e.ids.length === 1 && e.ids[0] === prev.id) {
+      const list = without(selected, cur, [sh.id]).map((x) => (x.key === e.key ? { ...x, ids: [sh.id] } : x));
+      commit(list, e.key);
+      return;
+    }
   }
+  const k = entryIndexOf(cur, sh.id);
+  if (k >= 0) { cycleKey = selected[k].ids.length === 1 ? selected[k].key : null; setCurrent(selected[k].key); return; }
+  startFigure([sh.id]);
+  cycleKey = currentKey;
 });
 
 // ------------------------------------------------------------------ 一覧
@@ -361,18 +365,16 @@ function renderList() {
   $("count").textContent = selected.length;
   $("emptyMsg").hidden = selected.length > 0;
   $("saveBtn").disabled = selected.length === 0;
-  const mb = $("mergeBtn");
-  mb.disabled = selected.length < 2 || checked.size === 1;
-  mb.textContent = checked.size >= 2 ? `チェックした${checked.size}個を1枚にまとめる` : "全部を1枚にまとめる";
   selected.forEach((it, k) => {
     const li = document.createElement("li");
     li.dataset.key = it.key;
     if (it.ids.length > 1) li.classList.add("merged");
-
-    const chk = document.createElement("input");
-    chk.type = "checkbox"; chk.className = "chk"; chk.title = "まとめる図としてチェック";
-    chk.checked = checked.has(it.key);
-    chk.onchange = () => { if (chk.checked) checked.add(it.key); else checked.delete(it.key); renderList(); };
+    if (it.key === currentKey) li.classList.add("current");
+    li.addEventListener("click", (e) => {
+      if (e.target.closest("input, select, button")) return;
+      if (it.slide !== cur) showSlide(it.slide);
+      setCurrent(it.key);
+    });
 
     const idx = document.createElement("span");
     idx.className = "idx"; idx.textContent = k + 1;
@@ -386,8 +388,7 @@ function renderList() {
       backgroundSize: `${data.slideW * z}px ${data.slideH * z}px`,
       backgroundPosition: `${-b.x * z + (W - b.w * z) / 2}px ${-b.y * z + (H - b.h * z) / 2}px`,
     });
-    crop.title = "このスライドを表示";
-    crop.onclick = () => showSlide(it.slide);
+    crop.title = "この図を選ぶ（⌘+クリックで足す先になる）";
 
     const fields = document.createElement("div");
     fields.className = "fields";
@@ -419,25 +420,19 @@ function renderList() {
       const sh = shapeOf(it.slide, it.ids[0]);
       src.textContent = `スライド${it.slide + 1}・${sh.kind}・${sh.name}`;
     } else {
-      src.textContent = `スライド${it.slide + 1}・${it.ids.length}個のオブジェクトを1枚に`;
+      src.textContent = `スライド${it.slide + 1}・${it.ids.length}個のオブジェクト`;
       src.title = it.ids.map((id) => shapeOf(it.slide, id).name).join("\n");
     }
     fields.append(row, src);
 
     const acts = document.createElement("div");
     acts.className = "acts";
-    if (it.ids.length > 1) {
-      const sp = document.createElement("button");
-      sp.className = "btn small"; sp.textContent = "分ける"; sp.title = "1個ずつの図に戻す";
-      sp.onclick = () => splitEntry(it);
-      acts.appendChild(sp);
-    }
     const rm = document.createElement("button");
     rm.className = "rm"; rm.textContent = "×"; rm.title = "一覧から外す";
-    rm.onclick = () => setSelection(selected.filter((x) => x.key !== it.key));
+    rm.onclick = () => commit(selected.filter((x) => x.key !== it.key), currentKey);
     acts.appendChild(rm);
 
-    li.append(chk, idx, crop, fields, acts);
+    li.append(idx, crop, fields, acts);
     li.addEventListener("mouseenter", () => { if (it.slide === cur) { hoverKey = keyOf(cur, it.ids[0]); drawOverlay(); } });
     li.addEventListener("mouseleave", () => { hoverKey = null; drawOverlay(); });
     ol.appendChild(li);
@@ -460,8 +455,7 @@ $("bulkExt").onchange = (e) => {
   renderList();
 };
 
-$("clearBtn").onclick = () => setSelection([]);
-$("mergeBtn").onclick = mergeEntries;
+$("clearBtn").onclick = () => commit([], null);
 $("selAllBtn").onclick = () => addMany(data.slides[cur].shapes);
 $("prevBtn").onclick = () => showSlide(cur - 1);
 $("nextBtn").onclick = () => showSlide(cur + 1);
@@ -543,12 +537,11 @@ document.addEventListener("keydown", (e) => {
   const typing = ["INPUT", "SELECT", "TEXTAREA"].includes(document.activeElement?.tagName);
   if (typing) return;
   const mod = e.metaKey || e.ctrlKey;
-  if (e.key === "Escape") { if (selected.length) setSelection([]); }
+  if (e.key === "Escape") { if (currentKey) setCurrent(null); }
   else if (mod && e.key.toLowerCase() === "a") { e.preventDefault(); addMany(data.slides[cur].shapes); }
-  else if (mod && e.key.toLowerCase() === "g") { e.preventDefault(); mergeEntries(); }
   else if (mod && e.key.toLowerCase() === "z") {
     e.preventDefault();
-    if (history.length) { selected = history.pop(); drawOverlay(); renderList(); }
+    if (history.length) { const h = history.pop(); selected = h.list; currentKey = h.current; drawOverlay(); renderList(); }
   } else if (["ArrowDown", "ArrowRight", "PageDown"].includes(e.key)) { e.preventDefault(); showSlide(cur + 1); }
   else if (["ArrowUp", "ArrowLeft", "PageUp"].includes(e.key)) { e.preventDefault(); showSlide(cur - 1); }
 });
