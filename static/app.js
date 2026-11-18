@@ -9,14 +9,17 @@ const LS = {
 
 let data = null;          // /api/upload の結果
 let cur = 0;              // 表示中のスライド
-let selected = [];        // [{key, slide, id}] 選んだ順
-let custom = {};          // key -> {name?, ext?}（オブジェクトごとに覚えておく）
+let selected = [];        // 図の一覧（選んだ順）[{key, slide, ids:[並び順...]}]。ids が複数なら1枚にまとめる
+let custom = {};          // 図の key -> {name?, ext?}（選び直しても覚えておく）
+let checked = new Set();  // 一覧でチェックした図の key
+let gseq = 0;             // まとめた図の key の通し番号
 let history = [];         // 選択の取り消し用
 let defaultExt = LS.get("ext", "png");
 let hoverKey = null;
 
 const keyOf = (slide, id) => `${slide}:${id}`;
 const shapeOf = (slide, id) => data.slides[slide].shapes.find((s) => s.id === id);
+const entryIndexOf = (slide, id) => selected.findIndex((e) => e.slide === slide && e.ids.includes(id));
 
 // ------------------------------------------------------------------ 読み込み
 
@@ -111,10 +114,23 @@ function drawOverlay() {
   const ov = $("overlay");
   ov.innerHTML = "";
   const s = scale();
-  const order = new Map(selected.map((it, k) => [it.key, k + 1]));
+  const order = new Map();
+  selected.forEach((e, k) => { if (e.slide === cur) e.ids.forEach((id) => order.set(id, k + 1)); });
+  // まとめた図は、全体を囲む破線の枠も描く
+  selected.forEach((e, k) => {
+    if (e.slide !== cur || e.ids.length < 2) return;
+    const b = entryBox(e);
+    const g = document.createElement("div");
+    g.className = "box grp";
+    Object.assign(g.style, { left: b.x * s - 4 + "px", top: b.y * s - 4 + "px", width: b.w * s + 8 + "px", height: b.h * s + 8 + "px" });
+    const t = document.createElement("span"); t.className = "num"; t.textContent = `${k + 1}（${e.ids.length}個で1枚）`;
+    g.appendChild(t);
+    ov.appendChild(g);
+  });
   for (const sh of data.slides[cur].shapes) {
     const key = keyOf(cur, sh.id);
-    const n = order.get(key);
+    const n = order.get(sh.id);
+    const k = n ? n - 1 : -1;
     if (!n && key !== hoverKey) continue;
     const b = document.createElement("div");
     b.className = "box " + (n ? "sel" : "hover");
@@ -123,7 +139,7 @@ function drawOverlay() {
       width: Math.max(2, sh.w * s) + "px", height: Math.max(2, sh.h * s) + "px",
       transform: sh.rot ? `rotate(${sh.rot}deg)` : "",
     });
-    if (n) { const t = document.createElement("span"); t.className = "num"; t.textContent = n; b.appendChild(t); }
+    if (n && selected[k].ids.length === 1) { const t = document.createElement("span"); t.className = "num"; t.textContent = n; b.appendChild(t); }
     ov.appendChild(b);
   }
   // サムネイルの選択数
@@ -190,29 +206,80 @@ function aabb(sh) {
 
 // ------------------------------------------------------------------ 選択
 
+function entryBox(e) {
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  e.ids.forEach((id) => {
+    const b = aabb(shapeOf(e.slide, id));
+    x0 = Math.min(x0, b.x); y0 = Math.min(y0, b.y); x1 = Math.max(x1, b.x + b.w); y1 = Math.max(y1, b.y + b.h);
+  });
+  return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+}
+
 function pushHistory() {
-  history.push(selected.map((it) => ({ ...it })));
+  history.push(selected.map((e) => ({ ...e, ids: [...e.ids] })));
   if (history.length > 100) history.shift();
 }
 
 function setSelection(list) {
   pushHistory();
   selected = list;
+  const keys = new Set(list.map((e) => e.key));
+  checked = new Set([...checked].filter((k) => keys.has(k)));
   drawOverlay();
   renderList();
 }
 
-function item(slide, id) { return { key: keyOf(slide, id), slide, id }; }
+function single(slide, id) { return { key: keyOf(slide, id), slide, ids: [id] }; }
+function group(slide, ids) {
+  if (ids.length === 1) return single(slide, ids[0]);
+  return { key: `g${++gseq}`, slide, ids: [...ids].sort((a, b) => a - b) };
+}
 
+// ⌘+クリック：入っていれば外し（まとめた図からも外す）、無ければ1枚の図として足す
 function toggle(slide, id) {
-  const key = keyOf(slide, id);
-  if (selected.some((it) => it.key === key)) setSelection(selected.filter((it) => it.key !== key));
-  else setSelection([...selected, item(slide, id)]);
+  const k = entryIndexOf(slide, id);
+  if (k < 0) { setSelection([...selected, single(slide, id)]); return; }
+  const e = selected[k];
+  const rest = e.ids.filter((x) => x !== id);
+  const list = [...selected];
+  if (rest.length) list[k] = { ...e, ids: rest }; else list.splice(k, 1);
+  setSelection(list);
 }
 
 function addMany(shapes) {
-  const have = new Set(selected.map((it) => it.key));
-  setSelection([...selected, ...shapes.filter((sh) => !have.has(keyOf(cur, sh.id))).map((sh) => item(cur, sh.id))]);
+  const add = shapes.filter((sh) => entryIndexOf(cur, sh.id) < 0).map((sh) => single(cur, sh.id));
+  setSelection([...selected, ...add]);
+}
+
+function addAsOne(shapes, replace) {
+  const ids = shapes.map((sh) => sh.id).filter((id) => replace || entryIndexOf(cur, id) < 0);
+  if (!ids.length) { if (replace) setSelection([]); return; }
+  setSelection([...(replace ? [] : selected), group(cur, ids)]);
+}
+
+// 一覧の図を1枚にまとめる（チェックが2つ以上ならその図、無ければ全部）
+function mergeEntries() {
+  const targets = checked.size >= 2 ? selected.filter((e) => checked.has(e.key)) : selected;
+  if (targets.length < 2) return;
+  const slide = targets[0].slide;
+  if (targets.some((e) => e.slide !== slide)) {
+    alert("別のスライドのオブジェクトは1枚にまとめられません。同じスライドの図だけをチェックしてください。");
+    return;
+  }
+  const merged = group(slide, targets.flatMap((e) => e.ids));
+  if (custom[targets[0].key]) custom[merged.key] = { ...custom[targets[0].key] };
+  const first = selected.indexOf(targets[0]);
+  const list = selected.filter((e) => !targets.includes(e));
+  list.splice(first, 0, merged);
+  checked.clear();
+  setSelection(list);
+}
+
+function splitEntry(e) {
+  const k = selected.indexOf(e);
+  const list = [...selected];
+  list.splice(k, 1, ...e.ids.map((id) => single(e.slide, id)));
+  setSelection(list);
 }
 
 let drag = null;
@@ -259,8 +326,9 @@ window.addEventListener("mouseup", (ev) => {
       const b = aabb(sh);
       return b.x >= x0 && b.y >= y0 && b.x + b.w <= x1 && b.y + b.h <= y1;
     });
-    if (d.add) addMany(inside);
-    else setSelection(inside.map((sh) => item(cur, sh.id)));
+    if (d.alt) addAsOne(inside, !d.add);      // ⌥+ドラッグ：囲んだものを1枚の図に
+    else if (d.add) addMany(inside);
+    else setSelection(inside.map((sh) => single(cur, sh.id)));
     return;
   }
   if (d.add && !d.alt) {   // ⌘ 等だけ：最前面を追加・解除
@@ -271,13 +339,12 @@ window.addEventListener("mouseup", (ev) => {
   }
   const sh = pickAt(d.start, d.alt);
   if (d.add) {             // ⌘+⌥：下のオブジェクトを追加
-    if (sh && !selected.some((it) => it.key === keyOf(cur, sh.id))) setSelection([...selected, item(cur, sh.id)]);
+    if (sh && entryIndexOf(cur, sh.id) < 0) setSelection([...selected, single(cur, sh.id)]);
     return;
   }
   if (sh) {
-    const key = keyOf(cur, sh.id);
-    if (selected.length === 1 && selected[0].key === key) return;
-    setSelection([item(cur, sh.id)]);
+    if (selected.length === 1 && entryIndexOf(cur, sh.id) === 0) return;
+    setSelection([single(cur, sh.id)]);
   } else if (selected.length) {
     setSelection([]);
   }
@@ -294,17 +361,25 @@ function renderList() {
   $("count").textContent = selected.length;
   $("emptyMsg").hidden = selected.length > 0;
   $("saveBtn").disabled = selected.length === 0;
+  const mb = $("mergeBtn");
+  mb.disabled = selected.length < 2 || checked.size === 1;
+  mb.textContent = checked.size >= 2 ? `チェックした${checked.size}個を1枚にまとめる` : "全部を1枚にまとめる";
   selected.forEach((it, k) => {
-    const sh = shapeOf(it.slide, it.id);
     const li = document.createElement("li");
     li.dataset.key = it.key;
+    if (it.ids.length > 1) li.classList.add("merged");
+
+    const chk = document.createElement("input");
+    chk.type = "checkbox"; chk.className = "chk"; chk.title = "まとめる図としてチェック";
+    chk.checked = checked.has(it.key);
+    chk.onchange = () => { if (chk.checked) checked.add(it.key); else checked.delete(it.key); renderList(); };
 
     const idx = document.createElement("span");
     idx.className = "idx"; idx.textContent = k + 1;
 
     const crop = document.createElement("div");
     crop.className = "crop";
-    const b = aabb(sh), W = 96, H = 64;
+    const b = entryBox(it), W = 96, H = 64;
     const z = Math.min(W / Math.max(b.w, 1), H / Math.max(b.h, 1));
     Object.assign(crop.style, {
       backgroundImage: `url(${data.slides[it.slide].image})`,
@@ -329,8 +404,8 @@ function renderList() {
       name.classList.toggle("custom", custom[it.key].name !== undefined);
     });
     name.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" || (e.key === "ArrowDown")) { e.preventDefault(); ol.children[k + 1]?.querySelector("input")?.focus(); }
-      if (e.key === "ArrowUp") { e.preventDefault(); ol.children[k - 1]?.querySelector("input")?.focus(); }
+      if (e.key === "Enter" || (e.key === "ArrowDown")) { e.preventDefault(); ol.children[k + 1]?.querySelector("input.name")?.focus(); }
+      if (e.key === "ArrowUp") { e.preventDefault(); ol.children[k - 1]?.querySelector("input.name")?.focus(); }
     });
     const ext = document.createElement("select");
     ext.className = "ext";
@@ -340,22 +415,39 @@ function renderList() {
     row.append(name, ext);
     const src = document.createElement("div");
     src.className = "src";
-    src.textContent = `スライド${it.slide + 1}・${sh.kind}・${sh.name}`;
+    if (it.ids.length === 1) {
+      const sh = shapeOf(it.slide, it.ids[0]);
+      src.textContent = `スライド${it.slide + 1}・${sh.kind}・${sh.name}`;
+    } else {
+      src.textContent = `スライド${it.slide + 1}・${it.ids.length}個のオブジェクトを1枚に`;
+      src.title = it.ids.map((id) => shapeOf(it.slide, id).name).join("\n");
+    }
     fields.append(row, src);
 
+    const acts = document.createElement("div");
+    acts.className = "acts";
+    if (it.ids.length > 1) {
+      const sp = document.createElement("button");
+      sp.className = "btn small"; sp.textContent = "分ける"; sp.title = "1個ずつの図に戻す";
+      sp.onclick = () => splitEntry(it);
+      acts.appendChild(sp);
+    }
     const rm = document.createElement("button");
     rm.className = "rm"; rm.textContent = "×"; rm.title = "一覧から外す";
     rm.onclick = () => setSelection(selected.filter((x) => x.key !== it.key));
+    acts.appendChild(rm);
 
-    li.append(idx, crop, fields, rm);
-    li.addEventListener("mouseenter", () => { if (it.slide === cur) { hoverKey = it.key; drawOverlay(); } });
+    li.append(chk, idx, crop, fields, acts);
+    li.addEventListener("mouseenter", () => { if (it.slide === cur) { hoverKey = keyOf(cur, it.ids[0]); drawOverlay(); } });
     li.addEventListener("mouseleave", () => { hoverKey = null; drawOverlay(); });
     ol.appendChild(li);
   });
 }
 
-function highlightRow(key) {
-  [...$("list").children].forEach((li) => li.classList.toggle("hl", li.dataset.key === key));
+function highlightRow(shapeKey) {
+  let ek = null;
+  if (shapeKey) { const [sl, id] = shapeKey.split(":").map(Number); const k = entryIndexOf(sl, id); if (k >= 0) ek = selected[k].key; }
+  [...$("list").children].forEach((li) => li.classList.toggle("hl", li.dataset.key === ek));
 }
 
 $("bulkExt").onchange = (e) => {
@@ -369,6 +461,7 @@ $("bulkExt").onchange = (e) => {
 };
 
 $("clearBtn").onclick = () => setSelection([]);
+$("mergeBtn").onclick = mergeEntries;
 $("selAllBtn").onclick = () => addMany(data.slides[cur].shapes);
 $("prevBtn").onclick = () => showSlide(cur - 1);
 $("nextBtn").onclick = () => showSlide(cur + 1);
@@ -394,7 +487,7 @@ async function doExport(overwrite) {
   const folder = $("folder").value.trim() || $("folder").placeholder;
   $("folder").value = folder;
   LS.set("folder", folder);
-  const items = selected.map((it, k) => ({ slide: it.slide, shapeId: it.id, name: nameOf(it, k).trim(), ext: extOf(it) }));
+  const items = selected.map((it, k) => ({ slide: it.slide, shapes: it.ids, name: nameOf(it, k).trim(), ext: extOf(it) }));
   busy(`${items.length} 個の図を書き出しています…`);
   let r, j;
   try {
@@ -452,6 +545,7 @@ document.addEventListener("keydown", (e) => {
   const mod = e.metaKey || e.ctrlKey;
   if (e.key === "Escape") { if (selected.length) setSelection([]); }
   else if (mod && e.key.toLowerCase() === "a") { e.preventDefault(); addMany(data.slides[cur].shapes); }
+  else if (mod && e.key.toLowerCase() === "g") { e.preventDefault(); mergeEntries(); }
   else if (mod && e.key.toLowerCase() === "z") {
     e.preventDefault();
     if (history.length) { selected = history.pop(); drawOverlay(); renderList(); }

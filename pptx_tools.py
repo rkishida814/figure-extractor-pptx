@@ -190,7 +190,8 @@ def build_preview_pptx(src: str, dst: str) -> int:
     return len(pkg.slide_parts)
 
 
-def _isolate_slide(slide_xml: bytes, shape_order: int, bg_rgb: str) -> bytes:
+def _isolate_slide(slide_xml: bytes, keep: set[int], bg_rgb: str) -> bytes:
+    """keep に入った並び順のオブジェクトだけを残す（重なり順はそのまま）。"""
     root = _xml(slide_xml)
     if root.get("show") is not None:
         del root.attrib["show"]
@@ -211,14 +212,15 @@ def _isolate_slide(slide_xml: bytes, shape_order: int, bg_rgb: str) -> bytes:
     csld.insert(0, bg)
 
     sptree = csld.find("p:spTree", NS)
-    found = False
+    found = set()
     for order, (el, _inner_el) in enumerate(list(_top_shapes(sptree))):
-        if order == shape_order:
-            found = True
+        if order in keep:
+            found.add(order)
             continue
         sptree.remove(el)
-    if not found:
-        raise ValueError(f"{shape_order + 1} 番目のオブジェクトが見つかりません")
+    missing = set(keep) - found
+    if missing:
+        raise ValueError(f"{sorted(m + 1 for m in missing)} 番目のオブジェクトが見つかりません")
     return _dump(root)
 
 
@@ -231,8 +233,8 @@ def _strip_slide_rels(rels_xml: bytes) -> bytes:
     return _dump(root)
 
 
-def build_export_pptx(src: str, dst: str, jobs: list[tuple[int, int]]) -> None:
-    """jobs = [(スライド番号0始まり, スライド内の並び順0始まり), ...]。
+def build_export_pptx(src: str, dst: str, jobs: list[tuple[int, list[int]]]) -> None:
+    """jobs = [(スライド番号0始まり, [スライド内の並び順0始まり, ...]), ...]。1つの job が1枚の図になる。
     出力の 1..n 枚目が各オブジェクトだけを白背景に、n+1..2n 枚目が黒背景に載せたスライドになる
     （2枚の差から透明度と範囲を求める）。元のスライドは非表示にして後ろに残す
     （元のスライドを消すと、ハイパーリンクなどの参照が切れて PowerPoint が修復を求めることがあるため）。"""
@@ -249,10 +251,10 @@ def build_export_pptx(src: str, dst: str, jobs: list[tuple[int, int]]) -> None:
     next_id = max(used_ids | {255}) + 1
 
     doubled = [(j, "FFFFFF") for j in jobs] + [(j, "000000") for j in jobs]
-    for i, ((slide_idx, shape_order), bg_rgb) in enumerate(doubled, start=1):
+    for i, ((slide_idx, orders), bg_rgb) in enumerate(doubled, start=1):
         src_part = pkg.slide_parts[slide_idx]
         new_part = f"ppt/slides/fxslide{i}.xml"
-        parts[new_part] = _isolate_slide(parts[src_part], shape_order, bg_rgb)
+        parts[new_part] = _isolate_slide(parts[src_part], set(orders), bg_rgb)
         src_rels = _rels_path(src_part)
         if src_rels in parts:
             parts[_rels_path(new_part)] = _strip_slide_rels(parts[src_rels])

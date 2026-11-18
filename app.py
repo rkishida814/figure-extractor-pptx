@@ -113,6 +113,9 @@ def _validate_items(items):
             errors.append(f"{i}番目: 名前が空です")
         elif BAD_CHARS.search(name) or name in (".", ".."):
             errors.append(f"{i}番目「{name}」: 使えない文字（\\ / : * ? \" < > |）が入っています")
+        shapes = it.get("shapes")
+        if not isinstance(shapes, list) or not shapes:
+            errors.append(f"{i}番目: オブジェクトがありません")
         if ext not in EXTS:
             errors.append(f"{i}番目: 拡張子 {ext} には対応していません")
         key = f"{name}.{ext}".lower()
@@ -152,7 +155,7 @@ def export():
     job_dir = tempfile.mkdtemp(dir=d)
     try:
         exp = os.path.join(job_dir, "export.pptx")
-        pptx_tools.build_export_pptx(src, exp, [(int(it["slide"]), int(it["shapeId"])) for it in items])
+        pptx_tools.build_export_pptx(src, exp, [(int(it["slide"]), [int(x) for x in it["shapes"]]) for it in items])
         pdf = os.path.join(job_dir, "export.pdf")
         renderer.pptx_to_pdf(exp, pdf)
         doc = fitz.open(pdf)
