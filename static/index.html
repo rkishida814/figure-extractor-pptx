@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Figure Extractor for PPTX</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <h1>Figure Extractor <span>for PPTX</span></h1>
+  <label class="btn primary" id="openBtn">pptx を開く<input type="file" id="fileInput" accept=".pptx,.pptm,.ppsx,.potx" hidden></label>
+  <span id="fileName" class="muted"></span>
+  <span id="status" class="muted"></span>
+  <span class="spacer"></span>
+  <span class="hint">クリックで選択 ／ ⌘・Ctrl・Shift+クリックで追加・解除 ／ ドラッグで範囲選択 ／ Esc 解除 ／ ⌘Z 戻す</span>
+</header>
+
+<main>
+  <nav id="thumbs"></nav>
+
+  <section id="stageWrap">
+    <div id="drop" class="drop">
+      <p>pptx をここにドロップするか、「pptx を開く」で選んでください</p>
+      <p class="muted" id="rendererInfo"></p>
+    </div>
+    <div id="stage" hidden>
+      <img id="slideImg" alt="" draggable="false">
+      <div id="overlay"></div>
+      <div id="band" hidden></div>
+    </div>
+    <div id="slideNav" hidden>
+      <button class="btn" id="prevBtn">◀</button>
+      <span id="slideLabel"></span>
+      <button class="btn" id="nextBtn">▶</button>
+      <button class="btn" id="selAllBtn" title="⌘A">このスライドを全選択</button>
+    </div>
+  </section>
+
+  <aside id="panel">
+    <div class="panelHead">
+      <h2>選択した図 <span id="count">0</span></h2>
+      <label>拡張子を一括
+        <select id="bulkExt">
+          <option value="">—</option>
+          <option>png</option><option>tif</option><option>bmp</option><option>jpg</option>
+        </select>
+      </label>
+      <button class="btn small" id="clearBtn">すべて解除</button>
+    </div>
+    <ol id="list"></ol>
+    <p id="emptyMsg" class="muted">スライド上のオブジェクトをクリックすると、ここに選んだ順に並びます。</p>
+
+    <div class="save">
+      <label class="row">保存先
+        <input id="folder" type="text" placeholder="~/Desktop/figures" spellcheck="false">
+        <button class="btn small" id="chooseBtn">参照…</button>
+      </label>
+      <div class="row">
+        <label>解像度
+          <select id="dpi">
+            <option value="150">150 dpi</option>
+            <option value="300" selected>300 dpi</option>
+            <option value="600">600 dpi</option>
+            <option value="1200">1200 dpi</option>
+          </select>
+        </label>
+        <label title="png・tif のみ。jpg・bmp は白背景になります"><input type="checkbox" id="transparent"> 背景を透明に（png・tif）</label>
+      </div>
+      <button class="btn primary big" id="saveBtn" disabled>一括保存</button>
+      <div id="result"></div>
+    </div>
+  </aside>
+</main>
+<script src="/static/app.js"></script>
+</body>
+</html>
