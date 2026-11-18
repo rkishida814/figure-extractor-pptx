@@ -144,9 +144,11 @@ function toEmu(ev) {
   return { x: (ev.clientX - r.left) / s, y: (ev.clientY - r.top) / s };
 }
 
-function hit(p) {
+// その点にあるオブジェクトを前面から順に返す
+function hitAll(p) {
   const tol = 5 / scale();
   const shapes = data.slides[cur].shapes;
+  const out = [];
   for (let k = shapes.length - 1; k >= 0; k--) {   // 後ろほど前面
     const sh = shapes[k];
     const cx = sh.x + sh.w / 2, cy = sh.y + sh.h / 2;
@@ -154,9 +156,28 @@ function hit(p) {
     const dx = p.x - cx, dy = p.y - cy;
     const rx = dx * Math.cos(a) - dy * Math.sin(a);
     const ry = dx * Math.sin(a) + dy * Math.cos(a);
-    if (Math.abs(rx) <= sh.w / 2 + tol && Math.abs(ry) <= sh.h / 2 + tol) return sh;
+    if (Math.abs(rx) <= sh.w / 2 + tol && Math.abs(ry) <= sh.h / 2 + tol) out.push(sh);
   }
-  return null;
+  return out;
+}
+
+function hit(p) { return hitAll(p)[0] || null; }
+
+// 同じ場所をもう一度クリック（または ⌥+クリック）したら、1つ下のオブジェクトを返す
+let lastPick = null;   // {slide, x, y, id}
+function pickAt(p, cycle) {
+  const hits = hitAll(p);
+  if (!hits.length) { lastPick = null; return null; }
+  let target = hits[0];
+  const tol = 4 / scale();
+  const same = lastPick && lastPick.slide === cur && Math.abs(lastPick.x - p.x) <= tol && Math.abs(lastPick.y - p.y) <= tol;
+  if (cycle || same) {
+    const k = lastPick && lastPick.slide === cur ? hits.findIndex((h) => h.id === lastPick.id) : -1;
+    if (k >= 0 && (same || cycle)) target = hits[(k + 1) % hits.length];
+    else if (cycle && hits.length > 1 && !same) target = hits[1];
+  }
+  lastPick = { slide: cur, x: p.x, y: p.y, id: target.id };
+  return target;
 }
 
 function aabb(sh) {
@@ -199,7 +220,7 @@ let drag = null;
 $("stage").addEventListener("mousedown", (ev) => {
   if (ev.button !== 0 || !data) return;
   ev.preventDefault();
-  drag = { start: toEmu(ev), sx: ev.clientX, sy: ev.clientY, moved: false, add: ev.metaKey || ev.ctrlKey || ev.shiftKey };
+  drag = { start: toEmu(ev), sx: ev.clientX, sy: ev.clientY, moved: false, add: ev.metaKey || ev.ctrlKey || ev.shiftKey, alt: ev.altKey };
 });
 
 window.addEventListener("mousemove", (ev) => {
@@ -242,8 +263,17 @@ window.addEventListener("mouseup", (ev) => {
     else setSelection(inside.map((sh) => item(cur, sh.id)));
     return;
   }
-  const sh = hit(d.start);
-  if (d.add) { if (sh) toggle(cur, sh.id); return; }
+  if (d.add && !d.alt) {   // ⌘ 等だけ：最前面を追加・解除
+    const sh = hit(d.start);
+    lastPick = sh ? { slide: cur, x: d.start.x, y: d.start.y, id: sh.id } : null;
+    if (sh) toggle(cur, sh.id);
+    return;
+  }
+  const sh = pickAt(d.start, d.alt);
+  if (d.add) {             // ⌘+⌥：下のオブジェクトを追加
+    if (sh && !selected.some((it) => it.key === keyOf(cur, sh.id))) setSelection([...selected, item(cur, sh.id)]);
+    return;
+  }
   if (sh) {
     const key = keyOf(cur, sh.id);
     if (selected.length === 1 && selected[0].key === key) return;

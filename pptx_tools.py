@@ -114,14 +114,6 @@ def _inner(el):
     return None
 
 
-def _shape_id(el) -> int | None:
-    inner = _inner(el)
-    if inner is None:
-        return None
-    c = inner.find(".//p:cNvPr", NS)
-    return int(c.get("id")) if c is not None else None
-
-
 def _top_shapes(sptree):
     for el in sptree:
         inner = _inner(el)
@@ -142,44 +134,40 @@ def _xfrm_of(inner):
 
 
 def list_shapes(path: str) -> dict:
-    """スライドごとの最上位オブジェクトの位置（EMU）を返す。"""
-    from pptx import Presentation  # プレースホルダーの位置の継承に使う
+    """スライドごとの最上位オブジェクトの位置（EMU）を返す。
+
+    オブジェクトは spTree の中での並び順（"id"）で見分ける。cNvPr の id は、別のファイルから
+    貼り付けたオブジェクトで重複していることがあり、見分けに使えない。"""
+    from pptx import Presentation
+    from pptx.shapes.shapetree import SlideShapeFactory  # プレースホルダーの位置の継承に使う
 
     pkg = Package.load(path)
     prs = Presentation(path)
     sw, sh = pkg.slide_size()
     slides = []
     for idx, slide in enumerate(prs.slides):
-        by_id = {}
-        for shp in slide.shapes:
-            try:
-                by_id[shp.shape_id] = shp
-            except Exception:
-                pass
         hidden_slide = slide._element.get("show") == "0"
         shapes = []
         sptree = slide.shapes._spTree
-        for el, inner in _top_shapes(sptree):
+        for order, (el, inner) in enumerate(_top_shapes(sptree)):
             cnv = inner.find(".//p:cNvPr", NS)
             if cnv is None or cnv.get("hidden") in ("1", "true"):
                 continue
-            sid = int(cnv.get("id"))
             geom = None
-            shp = by_id.get(sid)
-            if shp is not None and _local(el.tag) != "AlternateContent":
-                try:
-                    if shp.width is not None and shp.left is not None:
-                        rot = float(getattr(shp, "rotation", 0.0) or 0.0)
-                        geom = (int(shp.left), int(shp.top), int(shp.width), int(shp.height), rot)
-                except Exception:
-                    geom = None
+            try:
+                shp = SlideShapeFactory(inner, slide.shapes)
+                if shp.width is not None and shp.left is not None:
+                    rot = float(getattr(shp, "rotation", 0.0) or 0.0)
+                    geom = (int(shp.left), int(shp.top), int(shp.width), int(shp.height), rot)
+            except Exception:
+                geom = None
             if geom is None:
                 geom = _xfrm_of(inner)
             if geom is None:
                 continue
             x, y, w, h, rot = geom
             shapes.append({
-                "id": sid,
+                "id": order,
                 "name": cnv.get("name", ""),
                 "kind": KIND_LABEL.get(_local(inner.tag), "図形"),
                 "x": x, "y": y, "w": w, "h": h, "rot": rot,
@@ -202,7 +190,7 @@ def build_preview_pptx(src: str, dst: str) -> int:
     return len(pkg.slide_parts)
 
 
-def _isolate_slide(slide_xml: bytes, shape_id: int, bg_rgb: str) -> bytes:
+def _isolate_slide(slide_xml: bytes, shape_order: int, bg_rgb: str) -> bytes:
     root = _xml(slide_xml)
     if root.get("show") is not None:
         del root.attrib["show"]
@@ -224,13 +212,13 @@ def _isolate_slide(slide_xml: bytes, shape_id: int, bg_rgb: str) -> bytes:
 
     sptree = csld.find("p:spTree", NS)
     found = False
-    for el, _inner_el in list(_top_shapes(sptree)):
-        if _shape_id(el) == shape_id and not found:
+    for order, (el, _inner_el) in enumerate(list(_top_shapes(sptree))):
+        if order == shape_order:
             found = True
             continue
         sptree.remove(el)
     if not found:
-        raise ValueError(f"shape id {shape_id} が見つかりません")
+        raise ValueError(f"{shape_order + 1} 番目のオブジェクトが見つかりません")
     return _dump(root)
 
 
@@ -244,7 +232,7 @@ def _strip_slide_rels(rels_xml: bytes) -> bytes:
 
 
 def build_export_pptx(src: str, dst: str, jobs: list[tuple[int, int]]) -> None:
-    """jobs = [(スライド番号0始まり, shape id), ...]。
+    """jobs = [(スライド番号0始まり, スライド内の並び順0始まり), ...]。
     出力の 1..n 枚目が各オブジェクトだけを白背景に、n+1..2n 枚目が黒背景に載せたスライドになる
     （2枚の差から透明度と範囲を求める）。元のスライドは非表示にして後ろに残す
     （元のスライドを消すと、ハイパーリンクなどの参照が切れて PowerPoint が修復を求めることがあるため）。"""
@@ -261,10 +249,10 @@ def build_export_pptx(src: str, dst: str, jobs: list[tuple[int, int]]) -> None:
     next_id = max(used_ids | {255}) + 1
 
     doubled = [(j, "FFFFFF") for j in jobs] + [(j, "000000") for j in jobs]
-    for i, ((slide_idx, shape_id), bg_rgb) in enumerate(doubled, start=1):
+    for i, ((slide_idx, shape_order), bg_rgb) in enumerate(doubled, start=1):
         src_part = pkg.slide_parts[slide_idx]
         new_part = f"ppt/slides/fxslide{i}.xml"
-        parts[new_part] = _isolate_slide(parts[src_part], shape_id, bg_rgb)
+        parts[new_part] = _isolate_slide(parts[src_part], shape_order, bg_rgb)
         src_rels = _rels_path(src_part)
         if src_rels in parts:
             parts[_rels_path(new_part)] = _strip_slide_rels(parts[src_rels])
