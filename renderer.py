@@ -183,18 +183,33 @@ def _bbox(alpha: np.ndarray, thr: float = 0.02):
     return int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1
 
 
+def _safe_rect(*pages):
+    """PowerPoint は、ページとわずかに大きさの違う背景の四角を重ねて描く（白の上に背景色など）。
+    はみ出した端の細い帯を図と誤認しないよう、ページ全体を覆う四角すべてが重なる内側だけを調べる。"""
+    r = fitz.Rect(pages[0].rect)
+    for page in pages:
+        area = page.rect.width * page.rect.height
+        for dr in page.get_drawings():
+            rect = dr.get("rect")
+            if dr.get("fill") is not None and rect is not None and rect.width * rect.height >= 0.98 * area:
+                r &= rect
+    return r
+
+
 def crop_object(page_white, page_black, dpi: int) -> tuple[Image.Image, Image.Image]:
     """白背景・黒背景のページから、オブジェクトを余白なしで切り出す。
     戻り値は (白背景の RGB 画像, 背景透明の RGBA 画像)。"""
     # 低解像度で範囲を見つけ、その周りだけを目的の解像度で描く
     lo_zoom = 100 / 72
-    bbox = _bbox(_alpha(_render(page_white, lo_zoom, 255), _render(page_black, lo_zoom, 0)))
+    safe = _safe_rect(page_white, page_black)
+    safe = fitz.Rect(safe.x0 + 0.5, safe.y0 + 0.5, safe.x1 - 0.5, safe.y1 - 0.5)
+    bbox = _bbox(_alpha(_render(page_white, lo_zoom, 255, safe), _render(page_black, lo_zoom, 0, safe)))
     if bbox is None:
         raise RuntimeError("オブジェクトが描かれていません（スライドの枠外・非表示・透明の可能性）")
     pad = 3  # px（低解像度）
     x0, y0, x1, y1 = bbox
-    clip = fitz.Rect((x0 - pad) / lo_zoom, (y0 - pad) / lo_zoom,
-                     (x1 + pad) / lo_zoom, (y1 + pad) / lo_zoom) & page_white.rect
+    clip = fitz.Rect(safe.x0 + (x0 - pad) / lo_zoom, safe.y0 + (y0 - pad) / lo_zoom,
+                     safe.x0 + (x1 + pad) / lo_zoom, safe.y0 + (y1 + pad) / lo_zoom) & safe
     zoom = dpi / 72
     w = _render(page_white, zoom, 255, clip)
     b = _render(page_black, zoom, 0, clip)

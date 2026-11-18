@@ -2,10 +2,6 @@
 
 const $ = (id) => document.getElementById(id);
 const EXTS = ["png", "tif", "bmp", "jpg"];
-const LS = {
-  get(k, d) { try { const v = localStorage.getItem("fx." + k); return v === null ? d : v; } catch { return d; } },
-  set(k, v) { try { localStorage.setItem("fx." + k, v); } catch { /* なし */ } },
-};
 
 let data = null;          // /api/upload の結果
 let cur = 0;              // 表示中のスライド
@@ -13,7 +9,8 @@ let selected = [];        // 図の一覧（選んだ順）[{key, slide, ids:[�
 let custom = {};          // 図の key -> {name?, ext?}（選び直しても覚えておく）
 let gseq = 0;             // 図の key の通し番号
 let history = [];         // 選択の取り消し用
-let defaultExt = LS.get("ext", "png");
+let defaultExt = "png";
+let previews = {};        // 図の中身（sig）-> {url} / {pending} / {error}
 let hoverKey = null;
 
 const keyOf = (slide, id) => `${slide}:${id}`;
@@ -23,11 +20,14 @@ const entryIndexOf = (slide, id) => selected.findIndex((e) => e.slide === slide 
 // ------------------------------------------------------------------ 読み込み
 
 async function init() {
-  $("folder").value = LS.get("folder", "");
-  $("dpi").value = LS.get("dpi", "300");
-  $("transparent").checked = LS.get("transparent", "1") === "1";
   try {
     const st = await (await fetch("/api/status")).json();
+    // 前回の設定（アプリ側のファイルに保存している）
+    const set = st.settings || {};
+    $("folder").value = set.folder || "";
+    $("dpi").value = String(set.dpi || 300);
+    $("transparent").checked = set.transparent === undefined ? true : !!set.transparent;
+    if (set.ext && EXTS.includes(set.ext)) defaultExt = set.ext;
     $("rendererInfo").textContent = st.renderer
       ? `描画に使うアプリ: ${st.renderer === "powerpoint" ? "Microsoft PowerPoint" : "LibreOffice"}`
       : "PowerPoint も LibreOffice も見つかりません。どちらかを入れてください。";
@@ -45,7 +45,7 @@ async function loadFile(file) {
     const j = await r.json();
     if (!r.ok) throw new Error(j.error || r.statusText);
     data = j;
-    cur = 0; selected = []; custom = {}; history = []; currentKey = null; cycleKey = null; lastPick = null;
+    cur = 0; selected = []; custom = {}; history = []; previews = {}; currentKey = null; cycleKey = null; lastPick = null;
     $("fileName").textContent = j.filename;
     $("status").textContent = `${j.slides.length} 枚`;
     $("drop").hidden = true;
@@ -379,16 +379,19 @@ function renderList() {
     const idx = document.createElement("span");
     idx.className = "idx"; idx.textContent = k + 1;
 
+    // 実際に抽出した画像（背景透明）を表示する
     const crop = document.createElement("div");
     crop.className = "crop";
-    const b = entryBox(it), W = 96, H = 64;
-    const z = Math.min(W / Math.max(b.w, 1), H / Math.max(b.h, 1));
-    Object.assign(crop.style, {
-      backgroundImage: `url(${data.slides[it.slide].image})`,
-      backgroundSize: `${data.slideW * z}px ${data.slideH * z}px`,
-      backgroundPosition: `${-b.x * z + (W - b.w * z) / 2}px ${-b.y * z + (H - b.h * z) / 2}px`,
-    });
-    crop.title = "この図を選ぶ（⌘+クリックで足す先になる）";
+    const pv = previews[sigOf(it)];
+    if (pv && pv.url) {
+      const img = document.createElement("img");
+      img.src = pv.url; img.alt = ""; img.draggable = false;
+      crop.appendChild(img);
+    } else {
+      crop.classList.add("wait");
+      crop.textContent = pv && pv.error ? "抽出できません" : "抽出中…";
+      if (pv && pv.error) crop.title = pv.error;
+    }
 
     const fields = document.createElement("div");
     fields.className = "fields";
@@ -437,6 +440,35 @@ function renderList() {
     li.addEventListener("mouseleave", () => { hoverKey = null; drawOverlay(); });
     ol.appendChild(li);
   });
+  if (selected.some((e) => !previews[sigOf(e)])) requestPreviews();
+}
+
+function sigOf(e) { return `${e.slide}:${[...e.ids].sort((a, b) => a - b).join(",")}`; }
+
+let previewTimer = null;
+function requestPreviews() {
+  clearTimeout(previewTimer);
+  previewTimer = setTimeout(async () => {
+    if (!data) return;
+    const session = data.session;
+    const need = selected.filter((e) => !previews[sigOf(e)]);
+    if (!need.length) return;
+    need.forEach((e) => { previews[sigOf(e)] = { pending: true }; });
+    const keyToSig = Object.fromEntries(need.map((e) => [e.key, sigOf(e)]));
+    try {
+      const r = await fetch("/api/preview", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ session, items: need.map((e) => ({ key: e.key, slide: e.slide, shapes: e.ids })) }),
+      });
+      const j = await r.json();
+      if (!data || data.session !== session) return;
+      if (!r.ok) throw new Error(j.error || r.statusText);
+      for (const [key, v] of Object.entries(j.previews)) previews[keyToSig[key]] = v;
+    } catch (err) {
+      Object.values(keyToSig).forEach((sg) => { if (previews[sg]?.pending) previews[sg] = { error: err.message }; });
+    }
+    renderList();
+  }, 250);
 }
 
 function highlightRow(shapeKey) {
@@ -449,7 +481,7 @@ $("bulkExt").onchange = (e) => {
   const v = e.target.value;
   if (!v) return;
   defaultExt = v;
-  LS.set("ext", v);
+  saveSettings({ ext: v });
   selected.forEach((it) => { custom[it.key] = custom[it.key] || {}; custom[it.key].ext = v; });
   e.target.value = "";
   renderList();
@@ -468,11 +500,14 @@ $("chooseBtn").onclick = async () => {
     body: JSON.stringify({ start: $("folder").value }),
   });
   const j = await r.json();
-  if (j.folder) { $("folder").value = j.folder; LS.set("folder", j.folder); }
+  if (j.folder) { $("folder").value = j.folder; saveSettings({ folder: j.folder }); }
 };
-$("folder").onchange = () => LS.set("folder", $("folder").value);
-$("dpi").onchange = () => LS.set("dpi", $("dpi").value);
-$("transparent").onchange = () => LS.set("transparent", $("transparent").checked ? "1" : "0");
+function saveSettings(obj) {
+  fetch("/api/settings", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(obj) }).catch(() => {});
+}
+$("folder").onchange = () => saveSettings({ folder: $("folder").value.trim() });
+$("dpi").onchange = () => saveSettings({ dpi: Number($("dpi").value) });
+$("transparent").onchange = () => saveSettings({ transparent: $("transparent").checked });
 
 $("saveBtn").onclick = () => doExport(false);
 
@@ -480,7 +515,6 @@ async function doExport(overwrite) {
   if (!data || !selected.length) return;
   const folder = $("folder").value.trim() || $("folder").placeholder;
   $("folder").value = folder;
-  LS.set("folder", folder);
   const items = selected.map((it, k) => ({ slide: it.slide, shapes: it.ids, name: nameOf(it, k).trim(), ext: extOf(it) }));
   busy(`${items.length} 個の図を書き出しています…`);
   let r, j;

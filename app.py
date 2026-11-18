@@ -6,6 +6,8 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import os
 import platform
 import re
@@ -27,6 +29,11 @@ BASE = os.path.dirname(os.path.abspath(__file__))
 WORK = os.path.join(tempfile.gettempdir(), "figure-extractor-pptx")
 EXTS = ("png", "tif", "bmp", "jpg")
 BAD_CHARS = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
+SETTINGS_PATH = os.path.join(os.path.expanduser("~"), ".figure-extractor-pptx.json")
+SETTING_KEYS = ("folder", "dpi", "transparent", "ext")
+PREVIEW_MAX_PX = 360
+_settings_lock = threading.Lock()
+_render_lock = threading.Lock()  # 同じ図を二重に描かないように
 
 app = Flask(__name__, static_folder=os.path.join(BASE, "static"), static_url_path="/static")
 app.config["MAX_CONTENT_LENGTH"] = 1024 * 1024 * 1024  # 1 GB
@@ -59,9 +66,119 @@ def index():
     return send_from_directory(app.static_folder, "index.html")
 
 
+def _load_settings() -> dict:
+    try:
+        with open(SETTINGS_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+        return {k: v for k, v in data.items() if k in SETTING_KEYS}
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_settings(**kw) -> None:
+    with _settings_lock:
+        cur = _load_settings()
+        cur.update({k: v for k, v in kw.items() if k in SETTING_KEYS})
+        try:
+            with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
+                json.dump(cur, f, ensure_ascii=False, indent=1)
+        except OSError:
+            pass
+
+
 @app.get("/api/status")
 def status():
-    return jsonify({"renderer": renderer.available_renderer(), "home": os.path.expanduser("~")})
+    return jsonify({"renderer": renderer.available_renderer(), "home": os.path.expanduser("~"),
+                    "settings": _load_settings()})
+
+
+@app.post("/api/settings")
+def settings():
+    _save_settings(**(request.get_json(silent=True) or {}))
+    return jsonify({"ok": True})
+
+
+# ---------------------------------------------------------------- 抽出（プレビューと保存で共通）
+
+def _sig(slide: int, shapes: list[int]) -> str:
+    return hashlib.sha1(f"{slide}:{','.join(map(str, sorted(shapes)))}".encode()).hexdigest()[:16]
+
+
+def _rendered_pdf(d: str, items: list[dict]) -> dict[str, str]:
+    """各図について「白背景・黒背景の2ページの PDF」を用意して {sig: path} を返す。
+    作ったものはセッションのフォルダに残し、プレビューと保存で使い回す。"""
+    with _render_lock:
+        return _rendered_pdf_locked(d, items)
+
+
+def _rendered_pdf_locked(d: str, items: list[dict]) -> dict[str, str]:
+    cache = os.path.join(d, "figs")
+    os.makedirs(cache, exist_ok=True)
+    out, todo = {}, []
+    for it in items:
+        sig = _sig(int(it["slide"]), [int(x) for x in it["shapes"]])
+        path = os.path.join(cache, sig + ".pdf")
+        out[sig] = path
+        if not os.path.exists(path) and sig not in [t[0] for t in todo]:
+            todo.append((sig, int(it["slide"]), [int(x) for x in it["shapes"]]))
+    if todo:
+        job_dir = tempfile.mkdtemp(dir=d)
+        try:
+            exp = os.path.join(job_dir, "export.pptx")
+            pptx_tools.build_export_pptx(os.path.join(d, "source.pptx"), exp, [(sl, sh) for _, sl, sh in todo])
+            pdf = os.path.join(job_dir, "export.pdf")
+            renderer.pptx_to_pdf(exp, pdf)
+            n = len(todo)
+            with fitz.open(pdf) as doc:
+                if doc.page_count < 2 * n:
+                    raise RuntimeError(f"PDF のページ数（{doc.page_count}）が足りません")
+                for i, (sig, _, _) in enumerate(todo):
+                    one = fitz.open()
+                    one.insert_pdf(doc, from_page=i, to_page=i)
+                    one.insert_pdf(doc, from_page=n + i, to_page=n + i)
+                    one.save(out[sig])
+                    one.close()
+        finally:
+            shutil.rmtree(job_dir, ignore_errors=True)
+    return out
+
+
+@app.post("/api/preview")
+def preview():
+    """一覧に表示する、実際に抽出した画像（背景透明）を作る。"""
+    body = request.get_json(force=True)
+    sid = body.get("session")
+    d = _session_dir(sid)
+    items = [it for it in (body.get("items") or []) if it.get("shapes")]
+    if not items:
+        return jsonify({"previews": {}})
+    try:
+        pdfs = _rendered_pdf(d, items)
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"error": f"プレビューを作れませんでした: {e}"}), 500
+    result = {}
+    for it in items:
+        sig = _sig(int(it["slide"]), [int(x) for x in it["shapes"]])
+        png = os.path.join(d, "figs", sig + ".png")
+        if not os.path.exists(png):
+            try:
+                with fitz.open(pdfs[sig]) as doc:
+                    _w, rgba = renderer.crop_object(doc[0], doc[1], 150)
+                rgba.thumbnail((PREVIEW_MAX_PX, PREVIEW_MAX_PX))
+                rgba.save(png)
+            except Exception as e:  # noqa: BLE001
+                result[it["key"]] = {"error": str(e)}
+                continue
+        result[it["key"]] = {"url": f"/api/fig/{sid}/{sig}.png"}
+    return jsonify({"previews": result})
+
+
+@app.get("/api/fig/<sid>/<name>")
+def fig_image(sid, name):
+    d = _session_dir(sid)
+    if not re.fullmatch(r"[0-9a-f]{16}\.png", name):
+        abort(400)
+    return send_from_directory(os.path.join(d, "figs"), name, max_age=3600)
 
 
 @app.post("/api/upload")
@@ -151,32 +268,23 @@ def export():
     if existing and not overwrite:
         return jsonify({"conflict": existing}), 409
 
-    src = os.path.join(d, "source.pptx")
-    job_dir = tempfile.mkdtemp(dir=d)
     try:
-        exp = os.path.join(job_dir, "export.pptx")
-        pptx_tools.build_export_pptx(src, exp, [(int(it["slide"]), [int(x) for x in it["shapes"]]) for it in items])
-        pdf = os.path.join(job_dir, "export.pdf")
-        renderer.pptx_to_pdf(exp, pdf)
-        doc = fitz.open(pdf)
-        n = len(items)
-        if doc.page_count < 2 * n:
-            return jsonify({"error": f"PDF のページ数（{doc.page_count}）が足りません"}), 500
+        pdfs = _rendered_pdf(d, items)
         os.makedirs(folder, exist_ok=True)
         results = []
-        for i, (it, path) in enumerate(zip(items, targets)):
+        for it, path in zip(items, targets):
             try:
-                on_white, rgba = renderer.crop_object(doc[i], doc[n + i], dpi)
+                sig = _sig(int(it["slide"]), [int(x) for x in it["shapes"]])
+                with fitz.open(pdfs[sig]) as doc:
+                    on_white, rgba = renderer.crop_object(doc[0], doc[1], dpi)
                 renderer.save_image(on_white, rgba, path, it["ext"], dpi, transparent)
                 results.append({"file": os.path.basename(path), "ok": True,
                                 "size": [on_white.width, on_white.height]})
             except Exception as e:  # noqa: BLE001
                 results.append({"file": os.path.basename(path), "ok": False, "error": str(e)})
-        doc.close()
     except Exception as e:  # noqa: BLE001
         return jsonify({"error": f"書き出しに失敗しました: {e}"}), 500
-    finally:
-        shutil.rmtree(job_dir, ignore_errors=True)
+    _save_settings(folder=folder, dpi=dpi, transparent=transparent)
     return jsonify({"folder": folder, "results": results})
 
 

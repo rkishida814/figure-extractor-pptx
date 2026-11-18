@@ -56,7 +56,8 @@ def _write_zip(parts: dict[str, bytes], path: str) -> None:
         # [Content_Types].xml を先頭に置く
         order = sorted(parts, key=lambda n: (n != "[Content_Types].xml", n))
         for n in order:
-            z.writestr(n, parts[n])
+            media = n.startswith("ppt/media/") or n.startswith("ppt/embeddings/")
+            z.writestr(n, parts[n], compress_type=zipfile.ZIP_STORED if media else zipfile.ZIP_DEFLATED)
 
 
 def _xml(b: bytes):

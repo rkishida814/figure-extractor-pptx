@@ -84,9 +84,16 @@ main { flex: 1; display: flex; min-height: 0; }
 #list li:hover, #list li.hl { background: #fff6ec; border-color: #ffd7aa; }
 #list .idx { color: var(--accent); font-weight: 700; text-align: right; }
 #list .crop {
-  width: 96px; height: 64px; background-color: #fff; background-repeat: no-repeat; border: 1px solid var(--line); border-radius: 3px;
-  cursor: pointer;
+  width: 96px; height: 72px; border: 1px solid var(--line); border-radius: 3px;
+  display: flex; align-items: center; justify-content: center; overflow: hidden;
+  /* 透明な部分が分かるように市松模様 */
+  background-color: #fff;
+  background-image: linear-gradient(45deg, #e6e6e6 25%, transparent 25%), linear-gradient(-45deg, #e6e6e6 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, #e6e6e6 75%), linear-gradient(-45deg, transparent 75%, #e6e6e6 75%);
+  background-size: 10px 10px; background-position: 0 0, 0 5px, 5px -5px, -5px 0;
 }
+#list .crop img { max-width: 100%; max-height: 100%; object-fit: contain; display: block; }
+#list .crop.wait { background-image: none; background-color: #f4f4f2; color: var(--muted); font-size: 11px; }
 #list .fields { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
 #list .nameRow { display: flex; gap: 4px; }
 #list input.name { flex: 1; min-width: 0; padding: 4px 6px; border: 1px solid #ccc; border-radius: 4px; font: inherit; }
